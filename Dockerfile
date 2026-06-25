@@ -8,11 +8,10 @@ WORKDIR /build
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# --- Runtime stage: slim image with just the app and its deps, running as a non-root user ---
+# --- Runtime stage: slim image with just the app and its deps ---
+# NOTE: runs as root so uvicorn can bind the privileged port 80 (Northflank forwards to container port 80).
+# To run non-root later, switch uvicorn to an unprivileged port (e.g. 8080) and set the Northflank port to match.
 FROM python:3.14-slim AS runtime
-
-# Create an unprivileged user to run the app (avoids running as root).
-RUN useradd --create-home --uid 1000 appuser
 
 WORKDIR /divifilter
 
@@ -20,9 +19,7 @@ WORKDIR /divifilter
 COPY --from=builder /install /usr/local
 
 # Copy the application source.
-COPY --chown=appuser:appuser . /divifilter
-
-USER appuser
+COPY . /divifilter
 
 EXPOSE 80
 
