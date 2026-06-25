@@ -1,14 +1,33 @@
-FROM python:3.14
+# --- Build stage: install dependencies into an isolated prefix ---
+FROM python:3.14 AS builder
+
+WORKDIR /build
+
+# Copy only the dependency manifest first so the (expensive) pip install layer is cached and only
+# rebuilds when requirements.txt actually changes — not on every source edit.
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# --- Runtime stage: slim image with just the app and its deps, running as a non-root user ---
+FROM python:3.14-slim AS runtime
+
+# Create an unprivileged user to run the app (avoids running as root).
+RUN useradd --create-home --uid 1000 appuser
 
 WORKDIR /divifilter
 
-COPY . /divifilter
+# Bring over the packages installed in the build stage.
+COPY --from=builder /install /usr/local
 
-RUN pip install -r /divifilter/requirements.txt
+# Copy the application source.
+COPY --chown=appuser:appuser . /divifilter
+
+USER appuser
 
 EXPOSE 80
 
+# curl isn't present on the slim image, so probe /health with the Python stdlib instead.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD curl --fail http://localhost/health || exit 1
+  CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:80/health').status==200 else 1)" || exit 1
 
 ENTRYPOINT ["uvicorn", "dividend_stocks_filterer.app:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]

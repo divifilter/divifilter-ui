@@ -1,4 +1,8 @@
+import logging
+
 from parse_it import ParseIt
+
+logger = logging.getLogger(__name__)
 
 
 def read_configurations(config_folder: str = "config") -> dict:
@@ -12,7 +16,7 @@ def read_configurations(config_folder: str = "config") -> dict:
     Returns:
         :return config: a dict of all configurations needed for terraformize to work
     """
-    print("reading config variables")
+    logger.info("Reading configuration variables")
 
     config = {}
     parser = ParseIt(config_location=config_folder, recurse=True)

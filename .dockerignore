@@ -1,0 +1,37 @@
+# Virtualenvs
+.venv
+.venv_test
+venv
+env
+
+# Python caches / build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+build
+dist
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov
+.pytest_cache
+.tox
+
+# Version control & CI
+.git
+.github
+.gitignore
+
+# Editor / OS cruft
+.idea
+.vscode
+.DS_Store
+
+# Docs & project meta not needed in the image
+*.md
+LICENSE
+CONTRIBUTING
+CODE_OF_CONDUCT.md
+CONTRIBUTORS.md

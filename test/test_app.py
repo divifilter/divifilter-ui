@@ -15,7 +15,6 @@ class TestApp(unittest.TestCase):
             "radar_file": "2024-01-01",
             "yahoo_finance": "2024-01-02"
         }
-        mock_mysql.min_max_value_of_any_stock_key.return_value = 10.0
         mock_mysql.min_max_all_values.return_value = {
             'yield_max_raw': 10.0, '5y_yield_max': 10.0,
             'dgr1y_min': 0.0, 'dgr1y_max': 10.0,
@@ -237,6 +236,29 @@ class TestApp(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {"status": "error"})
+
+    def test_index_returns_503_when_db_unreachable(self):
+        self.mock_mysql.check_db_update_dates.side_effect = Exception("db down")
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("temporarily unavailable", response.text)
+
+    def test_get_ranges_recomputes_lazily_when_startup_failed(self):
+        # Simulate startup having failed to reach the DB (ranges left as None), then a request arrives.
+        self.app_module.ranges = None
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        # Ranges were recomputed on demand and cached.
+        self.assertIsNotNone(self.app_module.ranges)
+        self.mock_mysql.min_max_all_values.assert_called()
+
+    def test_startup_survives_db_outage(self):
+        # Re-import the app with the startup range query failing; the module must still import (app boots),
+        # leaving ranges=None for later lazy retry instead of crashing the process.
+        self.mock_mysql.min_max_all_values.side_effect = Exception("db down")
+        sys.modules.pop('dividend_stocks_filterer.app', None)
+        reloaded = importlib.import_module('dividend_stocks_filterer.app')
+        self.assertIsNone(reloaded.ranges)
 
     def test_post_filter_excluded_sectors_forwarded(self):
         self.mock_mysql.run_filter_query.reset_mock()

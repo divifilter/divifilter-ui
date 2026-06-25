@@ -62,29 +62,20 @@ class TestMysqlConnection(unittest.TestCase):
 
         self.assertEqual(result, {"radar_file": "2024-01-01", "yahoo_finance": "2024-01-02"})
 
-    def test_min_max_value_max(self):
-        self.mock_cursor.fetchall.return_value = [(25.5,)]
+    def test_min_max_all_values_maps_row_to_keys(self):
+        # 28 aggregate values in the SELECT, returned as one row of 28 columns.
+        row = tuple(float(i) for i in range(28))
+        self.mock_cursor.fetchall.return_value = [row]
 
-        result = self.db.min_max_value_of_any_stock_key("Div Yield", "max")
+        result = self.db.min_max_all_values()
 
-        self.assertEqual(result, 25.5)
         executed_query = self.mock_cursor.execute.call_args[0][0]
-        self.assertIn("MAX", executed_query)
-        self.assertIn("`Div Yield`", executed_query)
-
-    def test_min_max_value_min(self):
-        self.mock_cursor.fetchall.return_value = [(0.1,)]
-
-        result = self.db.min_max_value_of_any_stock_key("Price", "min")
-
-        self.assertEqual(result, 0.1)
-        executed_query = self.mock_cursor.execute.call_args[0][0]
-        self.assertIn("MIN", executed_query)
-        self.assertIn("`Price`", executed_query)
-
-    def test_min_max_value_invalid_raises(self):
-        with self.assertRaises(ValueError):
-            self.db.min_max_value_of_any_stock_key("Price", "avg")
+        self.assertIn("MAX(`Div Yield`)", executed_query)
+        self.assertIn("MAX(`Payout Ratio`)", executed_query)
+        # First and last keys map to the first and last selected aggregates.
+        self.assertEqual(result["yield_max_raw"], 0.0)
+        self.assertEqual(result["payout_ratio_max_raw"], 27.0)
+        self.assertEqual(len(result), 28)
 
     def test_list_values_of_key_in_db(self):
         self.mock_cursor.fetchall.return_value = [("AAPL",), ("MSFT",), ("GOOG",)]
@@ -137,12 +128,16 @@ class TestMysqlConnection(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertIn("MSFT", result)
         executed_query = self.mock_dict_cursor.execute.call_args[0][0]
+        executed_params = self.mock_dict_cursor.execute.call_args[0][1]
+        # Exclusion columns and placeholders are in the query; the values are bound params, not interpolated.
         self.assertIn("`Symbol` NOT IN", executed_query)
-        self.assertIn("'AAPL'", executed_query)
         self.assertIn("`Sector` NOT IN", executed_query)
-        self.assertIn("'Technology'", executed_query)
         self.assertIn("`Industry` NOT IN", executed_query)
-        self.assertIn("'Software'", executed_query)
+        self.assertIn("AAPL", executed_params)
+        self.assertIn("Technology", executed_params)
+        self.assertIn("Software", executed_params)
+        # The raw values must NOT appear quoted in the SQL string itself.
+        self.assertNotIn("'AAPL'", executed_query)
 
     def test_run_sql_query_default_mode(self):
         self.mock_cursor.fetchall.return_value = [("row1",)]
@@ -174,28 +169,11 @@ class TestMysqlConnection(unittest.TestCase):
 
         self.assertEqual(result, {"radar_file": "2024-01-01"})
 
-    def test_min_max_value_returns_negative(self):
-        self.mock_cursor.fetchall.return_value = [(-5.3,)]
-
-        result = self.db.min_max_value_of_any_stock_key("DGR 1Y", "min")
-
-        self.assertEqual(result, -5.3)
-
-    def test_min_max_value_returns_zero(self):
-        self.mock_cursor.fetchall.return_value = [(0.0,)]
-
-        result = self.db.min_max_value_of_any_stock_key("Div Yield", "min")
-
-        self.assertEqual(result, 0.0)
-
-    def test_min_max_value_column_with_spaces(self):
-        self.mock_cursor.fetchall.return_value = [(3.5,)]
-
-        result = self.db.min_max_value_of_any_stock_key("5Y Avg Yield", "max")
-
-        self.assertEqual(result, 3.5)
-        executed_query = self.mock_cursor.execute.call_args[0][0]
-        self.assertIn("`5Y Avg Yield`", executed_query)
+    def test_list_values_of_key_rejects_unlisted_column(self):
+        # Guards against arbitrary column identifiers reaching the SQL string.
+        with self.assertRaises(ValueError):
+            self.db.list_values_of_key_in_db("Symbol; DROP TABLE dividend_data_table")
+        self.mock_cursor.execute.assert_not_called()
 
     def test_list_values_of_key_empty_result(self):
         self.mock_cursor.fetchall.return_value = []
@@ -294,15 +272,17 @@ class TestMysqlConnection(unittest.TestCase):
         )
 
         executed_query = self.mock_dict_cursor.execute.call_args[0][0]
+        executed_params = self.mock_dict_cursor.execute.call_args[0][1]
+        # `FV %` is escaped to `FV %%` in the parameterized query string.
         for col in ["`No Years`", "`Div Yield`", "`5Y Avg Yield`", "`DGR 1Y`", "`DGR 3Y`",
-                    "`DGR 5Y`", "`DGR 10Y`", "`Chowder Number`", "`Price`", "`FV %`",
+                    "`DGR 5Y`", "`DGR 10Y`", "`Chowder Number`", "`Price`", "`FV %%`",
                     "`Revenue 1Y`", "`NPM`", "`CF/Share`", "`ROE`", "`P/E`", "`P/BV`",
                     "`Debt/Capital`", "`Payout Ratio`"]:
             self.assertIn(col, executed_query)
-        # Verify specific filter values appear in query
-        self.assertIn("5", executed_query)   # min_streak_years
-        self.assertIn("10", executed_query)  # chowder_number
-        self.assertIn("15", executed_query)  # fair_value
+        # Verify specific filter values are passed as bound params (not interpolated into the query string).
+        self.assertIn(5, executed_params)    # min_streak_years
+        self.assertIn(10, executed_params)   # chowder_number
+        self.assertIn(15, executed_params)   # fair_value
 
     def test_run_filter_query_uses_dict_pool(self):
         self.mock_dict_cursor.fetchall.return_value = [{"Symbol": "AAPL", "Price": 150.0}]
@@ -335,9 +315,42 @@ class TestMysqlConnection(unittest.TestCase):
         )
 
         executed_query = self.mock_dict_cursor.execute.call_args[0][0]
-        self.assertIn("'AAPL'", executed_query)
-        self.assertIn("'MSFT'", executed_query)
-        self.assertIn("'GOOG'", executed_query)
+        executed_params = self.mock_dict_cursor.execute.call_args[0][1]
+        # Three placeholders for three excluded symbols, values bound as params.
+        self.assertIn("`Symbol` NOT IN (%s, %s, %s)", executed_query)
+        self.assertIn("AAPL", executed_params)
+        self.assertIn("MSFT", executed_params)
+        self.assertIn("GOOG", executed_params)
+
+    def test_run_filter_query_exclusion_values_are_parameterized_not_injectable(self):
+        """A malicious exclusion value must be bound as a parameter, never interpolated into the SQL string."""
+        self.mock_dict_cursor.fetchall.return_value = []
+        malicious = "AAPL'); DROP TABLE dividend_data_table; --"
+
+        self.db.run_filter_query(
+            min_streak_years=5, yield_range_min=0.0, yield_range_max=10.0,
+            min_dgr=0.0, chowder_number=0, price_range_min=1.0, price_range_max=500.0,
+            fair_value=25, min_revenue=0.0, min_npm=0.0,
+            min_cf_per_share=0.0, min_roe=0.0, pe_range_min=0.0, pe_range_max=50.0,
+            max_price_per_book_value=100.0, max_debt_per_capital_value=1.0,
+            max_payout_ratio=100.0,
+            excluded_symbols=[malicious], excluded_sectors=[], excluded_industries=[]
+        )
+
+        executed_query = self.mock_dict_cursor.execute.call_args[0][0]
+        executed_params = self.mock_dict_cursor.execute.call_args[0][1]
+        # The dangerous string is carried only as a bound parameter...
+        self.assertIn(malicious, executed_params)
+        # ...and never appears in the SQL text, so it cannot terminate the statement or inject a new one.
+        self.assertNotIn("DROP TABLE", executed_query)
+        self.assertNotIn(malicious, executed_query)
+
+    def test_run_sql_query_passes_params_to_execute(self):
+        self.mock_cursor.fetchall.return_value = []
+
+        self.db.run_sql_query("SELECT * FROM t WHERE a = %s", "tuple", ["x"])
+
+        self.mock_cursor.execute.assert_called_once_with("SELECT * FROM t WHERE a = %s", ["x"])
 
     def test_run_sql_query_returns_connection_to_pool(self):
         self.mock_cursor.fetchall.return_value = [("row1",)]

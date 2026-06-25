@@ -3,3 +3,4 @@ source = dividend_stocks_filterer
 
 [report]
 show_missing = True
+fail_under = 95

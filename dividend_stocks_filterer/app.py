@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
@@ -12,12 +13,26 @@ from configure import read_configurations
 from db_functions import MysqlConnection
 from helper_functions import radar_dict_to_table
 
+logger = logging.getLogger(__name__)
+
+# Slider range caps — clamp raw DB min/max to sane bounds so a single outlier stock can't blow out a slider.
+YIELD_MAX_CAP = 25.0
+DGR_MIN_CAP = -25.0
+DGR_MAX_CAP = 25.0
+CHOWDER_MAX_CAP = 25.0
+FV_MIN_CAP = -25.0
+FV_MAX_FLOOR = 0.0
+PE_MIN_CAP = -50.0
+PE_MAX_CAP = 100.0
+PAYOUT_MAX_DEFAULT = 100.0
+
 app = FastAPI()
 templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "templates")
 )
 
-# --- One-time startup (mirrors ui.py) ---
+# --- One-time startup ---
+# Constructing the pool does NOT open a DB connection (mincached=0), so this is safe even when the DB is down.
 configuration = read_configurations()
 db = MysqlConnection(
     db_host=configuration["db_host"], db_schema=configuration["db_schema"],
@@ -25,37 +40,57 @@ db = MysqlConnection(
     db_user=configuration["db_user"]
 )
 
-_raw = db.min_max_all_values()
-ranges = {
-    # Dividend section
-    "streak_default": 5,
-    "yield_max": min(max(_raw['yield_max_raw'], _raw['5y_yield_max']), 25.0),
-    "dgr_min": max(min(_raw['dgr1y_min'], _raw['dgr3y_min'], _raw['dgr5y_min'], _raw['dgr10y_min']), -25.0),
-    "dgr_max": min(max(_raw['dgr1y_max'], _raw['dgr3y_max'], _raw['dgr5y_max'], _raw['dgr10y_max']), 25.0),
-    "chowder_max": int(min(_raw['chowder_max_raw'], 25.0)),
-    # Financial section
-    "price_max": _raw['price_max_raw'],
-    "fv_min": int(max(_raw['fv_min_raw'], -25.0)),
-    "fv_max": int(max(_raw['fv_max_raw'], 0.0)),
-    "revenue_min": _raw['revenue_min'],
-    "revenue_max": _raw['revenue_max'],
-    "npm_min": _raw['npm_min'],
-    "npm_max": _raw['npm_max'],
-    "cf_min": _raw['cf_min'],
-    "cf_max": _raw['cf_max'],
-    "roe_min": _raw['roe_min'],
-    "roe_max": _raw['roe_max'],
-    "pe_min": max(_raw['pe_min_raw'], -50.0),
-    "pe_max": min(_raw['pe_max_raw'], 100.0),
-    "pbv_min": _raw['pbv_min'],
-    "pbv_max": _raw['pbv_max'],
-    "debt_max": _raw['debt_max_raw'],
-    "payout_max": float(_raw['payout_ratio_max_raw']) if _raw['payout_ratio_max_raw'] is not None else 100.0,
-    # Exclusion options
-    "symbols": db.list_values_of_key_in_db("Symbol"),
-    "sectors": db.list_values_of_key_in_db("Sector"),
-    "industries": db.list_values_of_key_in_db("Industry"),
-}
+
+def compute_ranges() -> dict:
+    """Query the DB for the min/max values that drive the slider ranges and exclusion options."""
+    raw = db.min_max_all_values()
+    return {
+        # Dividend section
+        "streak_default": 5,
+        "yield_max": min(max(raw['yield_max_raw'], raw['5y_yield_max']), YIELD_MAX_CAP),
+        "dgr_min": max(min(raw['dgr1y_min'], raw['dgr3y_min'], raw['dgr5y_min'], raw['dgr10y_min']), DGR_MIN_CAP),
+        "dgr_max": min(max(raw['dgr1y_max'], raw['dgr3y_max'], raw['dgr5y_max'], raw['dgr10y_max']), DGR_MAX_CAP),
+        "chowder_max": int(min(raw['chowder_max_raw'], CHOWDER_MAX_CAP)),
+        # Financial section
+        "price_max": raw['price_max_raw'],
+        "fv_min": int(max(raw['fv_min_raw'], FV_MIN_CAP)),
+        "fv_max": int(max(raw['fv_max_raw'], FV_MAX_FLOOR)),
+        "revenue_min": raw['revenue_min'],
+        "revenue_max": raw['revenue_max'],
+        "npm_min": raw['npm_min'],
+        "npm_max": raw['npm_max'],
+        "cf_min": raw['cf_min'],
+        "cf_max": raw['cf_max'],
+        "roe_min": raw['roe_min'],
+        "roe_max": raw['roe_max'],
+        "pe_min": max(raw['pe_min_raw'], PE_MIN_CAP),
+        "pe_max": min(raw['pe_max_raw'], PE_MAX_CAP),
+        "pbv_min": raw['pbv_min'],
+        "pbv_max": raw['pbv_max'],
+        "debt_max": raw['debt_max_raw'],
+        "payout_max": float(raw['payout_ratio_max_raw']) if raw['payout_ratio_max_raw'] is not None else PAYOUT_MAX_DEFAULT,
+        # Exclusion options
+        "symbols": db.list_values_of_key_in_db("Symbol"),
+        "sectors": db.list_values_of_key_in_db("Sector"),
+        "industries": db.list_values_of_key_in_db("Industry"),
+    }
+
+
+# Compute ranges at startup, but don't let a transient DB outage stop the app from booting — retry lazily on the
+# first request that needs them (see get_ranges). This keeps /health answerable even when the DB is unreachable.
+try:
+    ranges = compute_ranges()
+except Exception:
+    logger.exception("Could not compute slider ranges at startup; will retry on first request")
+    ranges = None
+
+
+def get_ranges() -> dict:
+    """Return the cached slider ranges, computing them on demand if startup couldn't reach the DB."""
+    global ranges
+    if ranges is None:
+        ranges = compute_ranges()
+    return ranges
 
 
 @app.get("/health")
@@ -64,14 +99,24 @@ async def health():
         await run_in_threadpool(db.run_sql_query, "SELECT 1")
         return JSONResponse({"status": "ok"})
     except Exception:
+        logger.exception("Health check failed: database query did not succeed")
         return JSONResponse({"status": "error"}, status_code=503)
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    db_update_dates = await run_in_threadpool(db.check_db_update_dates)
+    try:
+        current_ranges = await run_in_threadpool(get_ranges)
+        db_update_dates = await run_in_threadpool(db.check_db_update_dates)
+    except Exception:
+        logger.exception("Could not load page data from the database")
+        return HTMLResponse(
+            "<h1>Service temporarily unavailable</h1>"
+            "<p>The dividend database is currently unreachable. Please try again shortly.</p>",
+            status_code=503,
+        )
     return templates.TemplateResponse(request, "index.html", {
-        "ranges": ranges,
+        "ranges": current_ranges,
         "db_update_dates": db_update_dates,
         "ga_measurement_id": configuration.get("ga_measurement_id", ""),
     })

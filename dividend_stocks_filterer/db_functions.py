@@ -28,13 +28,17 @@ class MysqlConnection:
         self._pool = PooledDB(**pool_kwargs)
         self._dict_pool = PooledDB(**pool_kwargs, cursorclass=pymysql.cursors.DictCursor)
 
-    def run_sql_query(self, sql_query: str, tuple_or_dict: str = "tuple") -> list:
+    def run_sql_query(self, sql_query: str, tuple_or_dict: str = "tuple", params=None) -> list:
         """
         Executes a SQL query on the database.
 
         Args:
             sql_query (str): The SQL query to execute.
             tuple_or_dict: a string of either "tuple" or "dict" to tell what format you want the response returned at.
+            params: optional sequence of values for a parameterized query. When provided, the values are passed to
+                the driver's execute() so they are safely escaped (prevents SQL injection); when None the query is
+                executed as-is. Note: pymysql treats a literal "%" as a format marker once params are passed, so any
+                static "%" in the query (e.g. the `FV %` column) must be written as "%%".
 
         Returns:
             list: A list of tuples containing the query response.
@@ -48,7 +52,10 @@ class MysqlConnection:
         conn = pool.connection()
         try:
             cur = conn.cursor()
-            cur.execute(sql_query)
+            if params is None:
+                cur.execute(sql_query)
+            else:
+                cur.execute(sql_query, params)
             query_response = cur.fetchall()
             cur.close()
             return query_response
@@ -64,29 +71,6 @@ class MysqlConnection:
             """
         db_update_query = "SELECT * FROM dividend_update_times"
         return dict(self.run_sql_query(db_update_query))
-
-    def min_max_value_of_any_stock_key(self, key_of_stock_name: str, min_or_max: str) -> float:
-        """
-        Takes a dict of the radar file and returns the highest/lowest price of any stock in it, ignores None values
-
-        :param key_of_stock_name: The key of the stock to return the max/min value of
-        :param min_or_max: if to return min or max
-
-        :return min_max_key_value: the highest/lowest value of any stock in the dict key
-
-        :raise ValueError: if min_or_max isn't min or max which are it's only allowed values
-        """
-        if min_or_max == "max":
-            query = "SELECT MAX(`{}`) FROM dividend_data_table WHERE `Div Yield` IS NOT NULL;".format(key_of_stock_name)
-        elif min_or_max == "min":
-            query = "SELECT MIN(`{}`) FROM dividend_data_table WHERE `Div Yield` IS NOT NULL;".format(key_of_stock_name)
-        else:
-            raise ValueError
-
-        # Execute the query and fetch the results
-        result = self.run_sql_query(query)[0][0]
-
-        return result
 
     def min_max_all_values(self) -> dict:
         """
@@ -134,18 +118,28 @@ class MysqlConnection:
         ]
         return dict(zip(keys, row))
 
+    # Columns whose distinct values may be listed (used to populate the exclusion dropdowns). A SQL identifier
+    # cannot be passed as a bound parameter, so we restrict it to this allowlist instead of interpolating freely.
+    LISTABLE_COLUMNS = ("Symbol", "Sector", "Industry")
+
     def list_values_of_key_in_db(self, key_to_list: str) -> list:
         """
-        Retrieve a list of tickers from the 'dividend_data_table' in the database.
+        Retrieve the list of distinct values for one column of 'dividend_data_table'.
 
         Args:
-            key_to_list (str): The key you want to return a list of values of..
+            key_to_list (str): The column whose distinct values to return. Must be one of LISTABLE_COLUMNS.
 
         Returns:
-            list: List of tickers.
+            list: Distinct values of the column.
+
+        Raises:
+            ValueError: if key_to_list is not an allowlisted column.
         """
-        # Create a SQL query to select all distinct tickers from the table
-        query = "SELECT DISTINCT  " + key_to_list + " FROM dividend_data_table;"
+        if key_to_list not in self.LISTABLE_COLUMNS:
+            raise ValueError("Unsupported column for listing: {}".format(key_to_list))
+
+        # key_to_list is constrained to the LISTABLE_COLUMNS allowlist above, so this is not an injection vector.
+        query = "SELECT DISTINCT `" + key_to_list + "` FROM dividend_data_table;"  # nosec B608
 
         # Execute the query and fetch the results
         result = self.run_sql_query(query)
@@ -190,50 +184,63 @@ class MysqlConnection:
         Returns:
             dict: Dictionary containing the query response.
         """
+        # Build a fully parameterized query. Every user-supplied value is passed as a bound parameter (%s) rather
+        # than interpolated into the SQL string, so values such as stock symbols cannot break out and inject SQL.
+        # The literal "%" in the `FV %` column is escaped as "%%" because pymysql runs %-formatting once params
+        # are supplied.
         filter_query = """
             SELECT *
             FROM dividend_data_table
             WHERE
-                (`No Years` >= {} OR `No Years` IS NULL)
-                AND (`Div Yield` BETWEEN {} AND {} OR `Div Yield` IS NULL)
-                AND (`5Y Avg Yield` BETWEEN {} AND {} OR `5Y Avg Yield` IS NULL)
-                AND (`DGR 1Y` >= {} OR `DGR 1Y` IS NULL)
-                AND (`DGR 3Y` >= {} OR `DGR 3Y` IS NULL)
-                AND (`DGR 5Y` >= {} OR `DGR 5Y` IS NULL)
-                AND (`DGR 10Y` >= {} OR `DGR 10Y` IS NULL)
-                AND (`Chowder Number` >= {} OR `Chowder Number` IS NULL)
-                AND (`Price` BETWEEN {} AND {} OR `Price` IS NULL)
-                AND (`FV %` <= {} OR `FV %` IS NULL)
-                AND (`Revenue 1Y` >= {} OR `Revenue 1Y` IS NULL)
-                AND (`NPM` >= {} OR `NPM` IS NULL)
-                AND (`CF/Share` >= {} OR `CF/Share` IS NULL)
-                AND (`ROE` >= {} OR `ROE` IS NULL)
-                AND (`P/E` BETWEEN {} AND {} OR `P/E` IS NULL)
-                AND (`P/BV` <= {} OR `P/BV` IS NULL)
-                AND (`Debt/Capital` <= {} OR `Debt/Capital` IS NULL)
-                AND (`Payout Ratio` <= {} OR `Payout Ratio` IS NULL)
-        """.format(min_streak_years, yield_range_min, yield_range_max, yield_range_min, yield_range_max,
-                   min_dgr, min_dgr, min_dgr, min_dgr, chowder_number, price_range_min, price_range_max,
-                   fair_value, min_revenue, min_npm, min_cf_per_share, min_roe,
-                   pe_range_min, pe_range_max, max_price_per_book_value, max_debt_per_capital_value,
-                   max_payout_ratio)
+                (`No Years` >= %s OR `No Years` IS NULL)
+                AND (`Div Yield` BETWEEN %s AND %s OR `Div Yield` IS NULL)
+                AND (`5Y Avg Yield` BETWEEN %s AND %s OR `5Y Avg Yield` IS NULL)
+                AND (`DGR 1Y` >= %s OR `DGR 1Y` IS NULL)
+                AND (`DGR 3Y` >= %s OR `DGR 3Y` IS NULL)
+                AND (`DGR 5Y` >= %s OR `DGR 5Y` IS NULL)
+                AND (`DGR 10Y` >= %s OR `DGR 10Y` IS NULL)
+                AND (`Chowder Number` >= %s OR `Chowder Number` IS NULL)
+                AND (`Price` BETWEEN %s AND %s OR `Price` IS NULL)
+                AND (`FV %%` <= %s OR `FV %%` IS NULL)
+                AND (`Revenue 1Y` >= %s OR `Revenue 1Y` IS NULL)
+                AND (`NPM` >= %s OR `NPM` IS NULL)
+                AND (`CF/Share` >= %s OR `CF/Share` IS NULL)
+                AND (`ROE` >= %s OR `ROE` IS NULL)
+                AND (`P/E` BETWEEN %s AND %s OR `P/E` IS NULL)
+                AND (`P/BV` <= %s OR `P/BV` IS NULL)
+                AND (`Debt/Capital` <= %s OR `Debt/Capital` IS NULL)
+                AND (`Payout Ratio` <= %s OR `Payout Ratio` IS NULL)
+        """
+        params = [
+            min_streak_years,
+            yield_range_min, yield_range_max,
+            yield_range_min, yield_range_max,
+            min_dgr, min_dgr, min_dgr, min_dgr,
+            chowder_number,
+            price_range_min, price_range_max,
+            fair_value,
+            min_revenue, min_npm, min_cf_per_share, min_roe,
+            pe_range_min, pe_range_max,
+            max_price_per_book_value, max_debt_per_capital_value,
+            max_payout_ratio,
+        ]
 
-        # Add NOT IN clauses only if the exclusion lists are not empty
-        if excluded_symbols:
-            filter_query += "AND `Symbol` NOT IN ({}) ".format(
-                ', '.join(["'{}'".format(symbol) for symbol in excluded_symbols]))
-        if excluded_sectors:
-            filter_query += "AND `Sector` NOT IN ({}) ".format(
-                ', '.join(["'{}'".format(sector) for sector in excluded_sectors]))
-        if excluded_industries:
-            filter_query += "AND `Industry` NOT IN ({}) ".format(
-                ', '.join(["'{}'".format(industry) for industry in excluded_industries]))
+        # Add NOT IN clauses only if the exclusion lists are not empty, using one bound parameter per value.
+        for column, excluded_values in (
+            ("Symbol", excluded_symbols),
+            ("Sector", excluded_sectors),
+            ("Industry", excluded_industries),
+        ):
+            if excluded_values:
+                placeholders = ", ".join(["%s"] * len(excluded_values))
+                filter_query += "AND `{}` NOT IN ({}) ".format(column, placeholders)
+                params.extend(excluded_values)
 
         # Add semicolon to the end of the query
         filter_query += ";"
 
         # Execute the SQL query
-        results = self.run_sql_query(filter_query, "dict")
+        results = self.run_sql_query(filter_query, "dict", params)
 
         # Convert results into the desired dictionary format
         output_dict = {}
