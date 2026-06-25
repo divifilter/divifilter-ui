@@ -840,14 +840,22 @@
     return cell ? cell.textContent.trim() : '';
   }
 
+  // Parse a displayed value into a number, understanding $, %, thousands separators and
+  // magnitude suffixes (K/M/B/T) so abbreviated columns like Market Cap sort by true value.
+  function parseNum(t) {
+    var s = t.replace(/[$,%\s]/g, '');
+    var m = s.match(/^(-?[0-9]*\.?[0-9]+)([KMBT])?$/i);
+    if (!m) return NaN;
+    var mult = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 }[(m[2] || '').toUpperCase()] || 1;
+    return parseFloat(m[1]) * mult;
+  }
+
   function inferType(rows, colIndex) {
     // Sample up to 10 non-empty values to decide numeric vs string
     for (var i = 0; i < Math.min(rows.length, 10); i++) {
       var t = cellText(rows[i], colIndex);
       if (t === '' || t === '—' || t === 'N/A') continue;
-      // Strip leading $, trailing %, commas
-      var cleaned = t.replace(/[$,%]/g, '').trim();
-      if (!isNaN(parseFloat(cleaned)) && isFinite(cleaned)) return 'numeric';
+      if (!isNaN(parseNum(t))) return 'numeric';
       return 'string';
     }
     return 'string';
@@ -865,9 +873,7 @@
 
       var cmp;
       if (type === 'numeric') {
-        var an = parseFloat(av.replace(/[$,%]/g, ''));
-        var bn = parseFloat(bv.replace(/[$,%]/g, ''));
-        cmp = an - bn;
+        cmp = parseNum(av) - parseNum(bv);
       } else {
         cmp = av.localeCompare(bv);
       }

@@ -310,6 +310,38 @@ class TestApp(unittest.TestCase):
         args = self.mock_mysql.run_filter_query.call_args
         self.assertIn("Banking", args[0][19])
 
+    # ── Large-number formatting (Market Cap etc.) ─────────────────────────
+
+    def test_human_format_abbreviations(self):
+        hf = self.app_module.human_format
+        self.assertEqual(hf(1.2e12), "1.20T")
+        self.assertEqual(hf(3.6671e10), "36.67B")
+        self.assertEqual(hf(5.374e8), "537.40M")
+        self.assertEqual(hf(12345), "12,345")
+        self.assertEqual(hf(None), "")
+        self.assertEqual(hf(float("nan")), "")
+
+    def test_filter_abbreviates_large_columns_in_html(self):
+        self.mocks['helper_functions'].radar_dict_to_table.return_value = pandas.DataFrame(
+            {"Market Cap": [3.6671e10, 5.374e8], "Div Yield": [3.5, 2.1]},
+            index=["AAPL", "MSFT"],
+        )
+        response = self.client.post("/filter", data={"min_streak_years": 5})
+        self.assertIn("36.67B", response.text)
+        self.assertIn("537.40M", response.text)
+        # No scientific notation, and small columns are left alone.
+        self.assertNotIn("e+10", response.text)
+        self.assertIn("3.5", response.text)
+
+    def test_export_csv_keeps_raw_large_numbers(self):
+        self.mocks['helper_functions'].radar_dict_to_table.return_value = pandas.DataFrame(
+            {"Market Cap": [3.6671e10]}, index=["AAPL"]
+        )
+        response = self.client.post("/export.csv", data={"min_streak_years": 5})
+        # CSV stays unformatted (no abbreviation) so the precise value is preserved.
+        self.assertIn("36671000000", response.text)
+        self.assertNotIn("36.67B", response.text)
+
     # ── CSV export ────────────────────────────────────────────────────────
 
     def test_export_csv_returns_csv_download(self):

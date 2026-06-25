@@ -122,6 +122,43 @@ async def index(request: Request):
     })
 
 
+LARGE_NUMBER_THRESHOLD = 1_000_000
+
+
+def human_format(value):
+    """Render a large number compactly (e.g. 36.67B, 1.53T, 537.40M) for display only.
+
+    No currency symbol — this is applied generically to any large-magnitude column (market cap, volume,
+    revenue, ...), not just dollar amounts. NaN/None render as an empty string.
+    """
+    if value is None or value != value:  # None or NaN
+        return ""
+    number = float(value)
+    magnitude = abs(number)
+    if magnitude >= 1e12:
+        return "{:.2f}T".format(number / 1e12)
+    if magnitude >= 1e9:
+        return "{:.2f}B".format(number / 1e9)
+    if magnitude >= 1e6:
+        return "{:.2f}M".format(number / 1e6)
+    return "{:,.0f}".format(number)
+
+
+def _large_number_formatters(df):
+    """Build a to_html formatters dict that abbreviates only the large-magnitude numeric columns.
+
+    Leaves small-valued columns (yields, ratios, price) untouched, and never mutates the DataFrame,
+    so the CSV export keeps the raw precise values.
+    """
+    formatters = {}
+    for col in df.columns:
+        if df[col].dtype.kind in ("i", "u", "f"):
+            col_max = df[col].abs().max()
+            if col_max == col_max and col_max >= LARGE_NUMBER_THRESHOLD:  # not NaN and large
+                formatters[col] = human_format
+    return formatters
+
+
 async def _filtered_dataframe(
     min_streak_years, yield_range_min, yield_range_max, min_dgr, chowder_number,
     price_range_min, price_range_max, fair_value, min_revenue, min_npm,
@@ -178,7 +215,8 @@ async def filter_stocks(
     )
     return templates.TemplateResponse(request, "_table.html", {
         "table_html": df.to_html(
-            classes="table table-striped table-hover table-sm", border=0, index=True
+            classes="table table-striped table-hover table-sm", border=0, index=True,
+            formatters=_large_number_formatters(df),
         ),
         "row_count": len(df),
     })
