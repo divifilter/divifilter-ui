@@ -310,6 +310,42 @@ class TestApp(unittest.TestCase):
         args = self.mock_mysql.run_filter_query.call_args
         self.assertIn("Banking", args[0][19])
 
+    # ── CSV export ────────────────────────────────────────────────────────
+
+    def test_export_csv_returns_csv_download(self):
+        self.mocks['helper_functions'].radar_dict_to_table.return_value = pandas.DataFrame(
+            {"Price": [150.0, 300.0]}, index=["AAPL", "MSFT"]
+        )
+        response = self.client.post("/export.csv", data={
+            "min_streak_years": 5, "yield_range_min": 0.0, "yield_range_max": 10.0,
+            "min_dgr": 0.0, "chowder_number": 0, "price_range_min": 1.0,
+            "price_range_max": 500.0, "fair_value": 0, "min_revenue": 0.0, "min_npm": 0.0,
+            "min_cf_per_share": 0.0, "min_roe": 0.0, "pe_range_min": -50.0,
+            "pe_range_max": 100.0, "max_price_per_book_value": 10.0,
+            "max_debt_per_capital_value": 1.0, "max_payout_ratio": 100.0,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("text/csv"))
+        self.assertIn("attachment; filename=divifilter_export.csv", response.headers["content-disposition"])
+        # Ticker (index) and a column both appear in the CSV body.
+        self.assertIn("AAPL", response.text)
+        self.assertIn("Price", response.text)
+
+    def test_export_csv_calls_run_filter_query(self):
+        self.mock_mysql.run_filter_query.reset_mock()
+        self.client.post("/export.csv", data={
+            "min_streak_years": 5, "yield_range_min": 0.0, "yield_range_max": 10.0,
+            "min_dgr": 0.0, "chowder_number": 0, "price_range_min": 1.0,
+            "price_range_max": 500.0, "fair_value": 0, "min_revenue": 0.0, "min_npm": 0.0,
+            "min_cf_per_share": 0.0, "min_roe": 0.0, "pe_range_min": -50.0,
+            "pe_range_max": 100.0, "max_price_per_book_value": 10.0,
+            "max_debt_per_capital_value": 1.0, "max_payout_ratio": 100.0,
+            "excluded_symbols": ["AAPL"],
+        })
+        self.mock_mysql.run_filter_query.assert_called_once()
+        # The exclusion list is forwarded to the same DB method as /filter.
+        self.assertIn("AAPL", self.mock_mysql.run_filter_query.call_args[0][17])
+
     # ── Structural / Layout ──────────────────────────────────────────────
 
     def test_index_contains_sidebar(self):
@@ -407,6 +443,16 @@ class TestApp(unittest.TestCase):
         self.assertIn('id="settings-toggle"', response.text)
         self.assertIn('id="darkmode-switch"', response.text)
         self.assertIn('id="disclaimerModal"', response.text)
+
+    def test_index_contains_export_share_reset_controls(self):
+        response = self.client.get("/")
+        self.assertIn('id="btn-export-csv"', response.text)
+        self.assertIn('id="btn-share-filter"', response.text)
+        self.assertIn('id="btn-reset-filters"', response.text)
+
+    def test_index_contains_results_search(self):
+        response = self.client.get("/")
+        self.assertIn('id="results-search"', response.text)
 
     # ── Google Analytics ─────────────────────────────────────────────
 

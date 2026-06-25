@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from fastapi import FastAPI, Request, Form
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from typing import List
 
@@ -122,6 +122,29 @@ async def index(request: Request):
     })
 
 
+async def _filtered_dataframe(
+    min_streak_years, yield_range_min, yield_range_max, min_dgr, chowder_number,
+    price_range_min, price_range_max, fair_value, min_revenue, min_npm,
+    min_cf_per_share, min_roe, pe_range_min, pe_range_max, max_price_per_book_value,
+    max_debt_per_capital_value, max_payout_ratio,
+    excluded_symbols, excluded_sectors, excluded_industries,
+):
+    """Run the filter query off the event loop and return the result as a DataFrame.
+
+    Shared by the HTML (/filter) and CSV (/export.csv) endpoints so the filtering logic lives in one place.
+    """
+    results = await run_in_threadpool(
+        db.run_filter_query,
+        min_streak_years, yield_range_min, yield_range_max,
+        min_dgr, chowder_number, price_range_min, price_range_max,
+        fair_value, min_revenue, min_npm, min_cf_per_share, min_roe,
+        pe_range_min, pe_range_max, max_price_per_book_value,
+        max_debt_per_capital_value, max_payout_ratio,
+        excluded_symbols, excluded_sectors, excluded_industries
+    )
+    return radar_dict_to_table(results)
+
+
 @app.post("/filter", response_class=HTMLResponse)
 async def filter_stocks(
     request: Request,
@@ -146,19 +169,56 @@ async def filter_stocks(
     excluded_sectors: List[str] = Form(default=[]),
     excluded_industries: List[str] = Form(default=[]),
 ):
-    results = await run_in_threadpool(
-        db.run_filter_query,
-        min_streak_years, yield_range_min, yield_range_max,
-        min_dgr, chowder_number, price_range_min, price_range_max,
-        fair_value, min_revenue, min_npm, min_cf_per_share, min_roe,
-        pe_range_min, pe_range_max, max_price_per_book_value,
+    df = await _filtered_dataframe(
+        min_streak_years, yield_range_min, yield_range_max, min_dgr, chowder_number,
+        price_range_min, price_range_max, fair_value, min_revenue, min_npm,
+        min_cf_per_share, min_roe, pe_range_min, pe_range_max, max_price_per_book_value,
         max_debt_per_capital_value, max_payout_ratio,
-        excluded_symbols, excluded_sectors, excluded_industries
+        excluded_symbols, excluded_sectors, excluded_industries,
     )
-    df = radar_dict_to_table(results)
     return templates.TemplateResponse(request, "_table.html", {
         "table_html": df.to_html(
             classes="table table-striped table-hover table-sm", border=0, index=True
         ),
         "row_count": len(df),
     })
+
+
+@app.post("/export.csv")
+async def export_csv(
+    min_streak_years: int = Form(5),
+    yield_range_min: float = Form(0.0),
+    yield_range_max: float = Form(10.0),
+    min_dgr: float = Form(0.0),
+    chowder_number: int = Form(0),
+    price_range_min: float = Form(1.0),
+    price_range_max: float = Form(500.0),
+    fair_value: int = Form(0),
+    min_revenue: float = Form(0.0),
+    min_npm: float = Form(0.0),
+    min_cf_per_share: float = Form(0.0),
+    min_roe: float = Form(0.0),
+    pe_range_min: float = Form(-50.0),
+    pe_range_max: float = Form(100.0),
+    max_price_per_book_value: float = Form(10.0),
+    max_debt_per_capital_value: float = Form(1.0),
+    max_payout_ratio: float = Form(100.0),
+    excluded_symbols: List[str] = Form(default=[]),
+    excluded_sectors: List[str] = Form(default=[]),
+    excluded_industries: List[str] = Form(default=[]),
+):
+    """Return the current filtered result set as a downloadable CSV (same filters as /filter)."""
+    df = await _filtered_dataframe(
+        min_streak_years, yield_range_min, yield_range_max, min_dgr, chowder_number,
+        price_range_min, price_range_max, fair_value, min_revenue, min_npm,
+        min_cf_per_share, min_roe, pe_range_min, pe_range_max, max_price_per_book_value,
+        max_debt_per_capital_value, max_payout_ratio,
+        excluded_symbols, excluded_sectors, excluded_industries,
+    )
+    # index=True keeps the ticker symbol, which radar_dict_to_table stores as the DataFrame index.
+    csv_data = df.to_csv(index=True)
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=divifilter_export.csv"},
+    )
